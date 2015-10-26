@@ -6,6 +6,13 @@ import numpy
 import argparse
 import pickle
 
+
+class FragmentView(object):
+    def __init__(self, img, name):
+        self.img = img
+        cv2.imshow(name, img)
+
+
 class ROICtrl(object):
     COLOR_ROI_MARGIN = (0, 255, 0)
     COLOR_ROI_POINT = (255, 0, 0)
@@ -65,16 +72,25 @@ class Application(object):
         self.project_path = project_path
         src_img = None if src_img_path is None else cv2.imread(src_img_path)
 
-        img = None
         ROI = []
-
         try:
             cached_data = pickle.load(open(project_path, "rb"))
             ROI = cached_data['ROI']
         except (ValueError, OSError, IOError, pickle.UnpicklingError) as e:
             logging.error('ROI settings was not loaded: %s' % e)
 
-        self.roi_ctrl_view = ROICtrl(src_img if src_img is not None else img, ROI, "Source image view")
+        self.roi_ctrl_view = ROICtrl(src_img, ROI, "Source image view")
+
+
+    def process(self):
+        img = self.roi_ctrl_view.img
+        for region in self.roi_ctrl_view.ROI:
+            pass
+
+        gray_mat = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        edges_mat = gray_mat.copy()
+        edges_mat = cv2.Canny(edges_mat, 100, 200)
+        cv2.imshow("edges", edges_mat)
 
     def save(self):
         assert self.project_path is not None
@@ -97,4 +113,5 @@ if __name__ == "__main__":
 
     app = Application()
     app.init(args.src_image, args.project)
+    app.process()
     app.event_loop()
