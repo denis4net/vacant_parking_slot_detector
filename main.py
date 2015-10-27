@@ -37,47 +37,71 @@ class MultipleImagesView(object):
         cv2.imshow(self.title, self.image)
 
 
+class ROI(object):
+    class Type:
+        FREE = 1
+        BUSY = 2
+
+    def __init__(self, points, type):
+        self.points = points
+        self.type = type
+
+    def is_free(self):
+        return self.type == ROI.Type.FREE
+
+    def is_busy(self):
+        return self.type == ROI.Type.BUSY
+
+
 class ROICtrl(object):
-    COLOR_ROI_MARGIN = (0, 255, 0)
+    COLOR_FREE_ROI_MARGIN = (0, 255, 0)
+    COLOR_BUSY_ROI_MARGIN = (0, 0, 255)
     COLOR_ROI_POINT = (255, 0, 0)
 
-    def __init__(self, img, ROI, window_name):
+    def __init__(self, img, ROIs, window_name):
         self._points = []
         self.img = img
         self.name = window_name
         self.selected_region = None
-        self.ROI = ROI if ROI is not None else []
+        self.ROIs = ROIs if ROIs is not None else []
+        self.roi_type = ROI.Type.FREE
 
         cv2.imshow(self.name, self.img)
         cv2.setMouseCallback(window_name, self.__mouse_event_callback)
         self.__update_points()
 
-    def __hightlight_ROI(self, img, points):
+    def __hightlight_region(self, img, points, color):
         for point in points:
                 cv2.circle(img, point, 3, self.COLOR_ROI_POINT, 3)
 
         if len(points) > 3:
-            cv2.line(img, points[0], points[-1], self.COLOR_ROI_MARGIN, 2)
+            cv2.line(img, points[0], points[-1], color, 2)
 
             for i in range(1, len(points)):
-                cv2.line(img, points[i-1], points[i], self.COLOR_ROI_MARGIN, 2)
+                cv2.line(img, points[i-1], points[i], color, 2)
 
     def __update_points(self):
-        if len(self._points) > 0 or len(self.ROI) > 0:
+        if len(self._points) > 0 or len(self.ROIs) > 0:
             img = self.img.copy()
-            self.__hightlight_ROI(img, self._points)
-            for points in self.ROI:
-                self.__hightlight_ROI(img, points)
+            self.__hightlight_region(img, self._points, self.COLOR_FREE_ROI_MARGIN)
+
+            for roi in self.ROIs:
+                self.__hightlight_region(img, roi.points, self.COLOR_FREE_ROI_MARGIN if roi.is_free() else self.COLOR_BUSY_ROI_MARGIN)
 
             cv2.imshow(self.name, img)
 
     def __mouse_event_callback(self, event, x, y, flags, params):
-        if event == cv2.EVENT_LBUTTONDOWN:
+        if event == cv2.EVENT_LBUTTONDOWN or event == cv2.EVENT_RBUTTONDOWN:
+            if event == cv2.EVENT_RBUTTONDOWN:
+                self.roi_type = ROI.Type.FREE
+            else:
+                self.roi_type = ROI.Type.BUSY
+
             if len(self._points) < 4:
                 self._points.append((x, y))
 
             if len(self._points) == 4:
-                self.ROI.append(self._points)
+                self.ROIs.append(ROI(self._points, self.roi_type))
                 self._points = []
 
             self.__update_points()
@@ -114,19 +138,18 @@ class Application(object):
         edges_mat = cv2.Canny(edges_mat, 100, 200)
 
         roi_images = []
-        for region in self.roi_ctrl_view.ROI:
-            sample = algoritms.crop_sample_image(edges_mat, region)
+        for roi in self.roi_ctrl_view.ROIs:
+            sample = algoritms.crop_sample_image(edges_mat, roi.points)
             roi_images.append(sample)
 
-        logging.debug("training image shape: %s", algoritms.compute_training_sample_shape(roi_images))
-
         if len(roi_images) > 0:
+            logging.debug("training image shape: %s", algoritms.compute_training_sample_shape(roi_images))
             miv = MultipleImagesView("ROI", roi_images)
             miv.show()
 
     def save(self):
         assert self.project_path is not None
-        cached_data = {'ROI': self.roi_ctrl_view.ROI}
+        cached_data = {'ROI': self.roi_ctrl_view.ROIs}
         pickle.dump(cached_data, open(self.project_path, "wb"))
 
     def event_loop(self):
