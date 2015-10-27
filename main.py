@@ -2,15 +2,39 @@
 
 import logging
 import cv2
-import numpy
+import numpy as np
 import argparse
 import pickle
-
+import algoritms
 
 class FragmentView(object):
-    def __init__(self, img, name):
+    def __init__(self, img, title):
         self.img = img
-        cv2.imshow(name, img)
+        self.title = title
+
+    def show(self):
+        cv2.imshow(self.title, self.img)
+
+
+class MultipleImagesView(object):
+    def __init__(self, title, images):
+        self.images = images
+        self.title = title
+        self.max_img_width = max([image.shape[1] for image in self.images])
+        self.max_img_height = max([image.shape[0] for image in self.images])
+
+        shape = (self.max_img_height, (self.max_img_width + 2) * len(images)) if len(images[0].shape) < 3 else  (self.max_img_height, (self.max_img_width + 2) * len(images), images[0].shape[2])
+        self.image = np.zeros(shape, dtype=images[0].dtype)
+        current_x = 0
+        current_y = 0
+
+        for image in self.images:
+            logging.debug("%s - %s" % (self.image.shape, image.shape))
+            self.image[current_y:current_y+image.shape[0], current_x:current_x+image.shape[1]] = image
+            current_x += image.shape[1] + 2
+
+    def show(self):
+        cv2.imshow(self.title, self.image)
 
 
 class ROICtrl(object):
@@ -52,7 +76,7 @@ class ROICtrl(object):
             if len(self._points) < 4:
                 self._points.append((x, y))
 
-            if (len(self._points) == 4):
+            if len(self._points) == 4:
                 self.ROI.append(self._points)
                 self._points = []
 
@@ -81,16 +105,24 @@ class Application(object):
 
         self.roi_ctrl_view = ROICtrl(src_img, ROI, "Source image view")
 
-
     def process(self):
+        # denoise: cv2.fastNlMeansDenoisingColored()
         img = self.roi_ctrl_view.img
-        for region in self.roi_ctrl_view.ROI:
-            pass
-
+        # cv2.imshow('denoised', img)
         gray_mat = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         edges_mat = gray_mat.copy()
         edges_mat = cv2.Canny(edges_mat, 100, 200)
-        cv2.imshow("edges", edges_mat)
+
+        roi_images = []
+        for region in self.roi_ctrl_view.ROI:
+            sample = algoritms.crop_sample_image(edges_mat, region)
+            roi_images.append(sample)
+
+        logging.debug("training image shape: %s", algoritms.compute_training_sample_shape(roi_images))
+
+        if len(roi_images) > 0:
+            miv = MultipleImagesView("ROI", roi_images)
+            miv.show()
 
     def save(self):
         assert self.project_path is not None
