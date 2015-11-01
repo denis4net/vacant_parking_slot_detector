@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import logging
 import cv2
@@ -6,6 +6,24 @@ import numpy as np
 import argparse
 import pickle
 import algoritms
+
+
+class EventEmiter(object):
+    def __init__(self):
+        self.events = {}
+
+    def on(self, name, handler):
+        if name not in self.events:
+            self.events[name] = []
+
+        self.events[name].append(handler)
+
+    def emit(self, name, **kwargs):
+        logging.debug('EventEmiter: emit(%s)' % name)
+        if name in self.events:
+            for handler in self.events[name]:
+                handler(**kwargs)
+
 
 class FragmentView(object):
     def __init__(self, img, title):
@@ -23,14 +41,14 @@ class MultipleImagesView(object):
         self.max_img_width = max([image.shape[1] for image in self.images])
         self.max_img_height = max([image.shape[0] for image in self.images])
 
-        shape = (self.max_img_height, (self.max_img_width + 2) * len(images)) if len(images[0].shape) < 3 else  (self.max_img_height, (self.max_img_width + 2) * len(images), images[0].shape[2])
+        shape = (self.max_img_height, (self.max_img_width + 2) * len(images)) if len(images[0].shape) < 3 else (self.max_img_height, (self.max_img_width + 2) * len(images), images[0].shape[2])
         self.image = np.zeros(shape, dtype=images[0].dtype)
         current_x = 0
         current_y = 0
 
         for image in self.images:
             logging.debug("%s - %s" % (self.image.shape, image.shape))
-            self.image[current_y:current_y+image.shape[0], current_x:current_x+image.shape[1]] = image
+            self.image[current_y:current_y + image.shape[0], current_x:current_x + image.shape[1]] = image
             current_x += image.shape[1] + 2
 
     def show(self):
@@ -38,11 +56,16 @@ class MultipleImagesView(object):
 
 
 class ROI(object):
+    __counter = 0
+
     class Type:
         FREE = 1
         BUSY = 2
 
     def __init__(self, points, type):
+        self.id = self.__counter
+        self.__counter += 1
+
         self.points = points
         self.type = type
 
@@ -53,12 +76,21 @@ class ROI(object):
         return self.type == ROI.Type.BUSY
 
 
-class ROICtrl(object):
+class ROICtrl(EventEmiter):
+    """
+    UI Windows that allow chose regions of interests
+    """
+
     COLOR_FREE_ROI_MARGIN = (0, 255, 0)
     COLOR_BUSY_ROI_MARGIN = (0, 0, 255)
     COLOR_ROI_POINT = (255, 0, 0)
 
+    class Events:
+        ROI_UPDATED = 'roi_updated'
+
     def __init__(self, img, ROIs, window_name):
+        EventEmiter.__init__(self)
+
         self._points = []
         self.img = img
         self.name = window_name
@@ -78,7 +110,7 @@ class ROICtrl(object):
             cv2.line(img, points[0], points[-1], color, 2)
 
             for i in range(1, len(points)):
-                cv2.line(img, points[i-1], points[i], color, 2)
+                cv2.line(img, points[i - 1], points[i], color, 2)
 
     def __update_points(self):
         if len(self._points) > 0 or len(self.ROIs) > 0:
@@ -102,6 +134,7 @@ class ROICtrl(object):
 
             if len(self._points) == 4:
                 self.ROIs.append(ROI(self._points, self.roi_type))
+                self.emit(ROICtrl.Events.ROI_UPDATED, data=self.ROIs)
                 self._points = []
 
             self.__update_points()
@@ -111,45 +144,88 @@ class ROICtrl(object):
 
 
 class Application(object):
+    IMAGE_VIEW_WINDOWS_NAME = "Image view"
 
     def __init__(self):
         self.roi_ctrl_view = None
         self.project_path = None
+        self.classificator = None
 
-    def init(self, src_img_path, project_path):
+    def init(self, img_path, project_path):
         self.project_path = project_path
-        src_img = None if src_img_path is None else cv2.imread(src_img_path)
+        src_img = None if img_path is None else cv2.imread(img_path)
 
         ROI = []
         try:
             cached_data = pickle.load(open(project_path, "rb"))
             ROI = cached_data['ROI']
+            self.init_classificator(cached_data['classificator_data'])
         except (ValueError, OSError, IOError, pickle.UnpicklingError) as e:
-            logging.error('ROI settings was not loaded: %s' % e)
+            logging.error('settings was not loaded: %s' % e)
 
-        self.roi_ctrl_view = ROICtrl(src_img, ROI, "Source image view")
+        self.roi_ctrl_view = ROICtrl(src_img, ROI, self.IMAGE_VIEW_WINDOWS_NAME)
+        self.roi_ctrl_view.on(ROICtrl.Events.ROI_UPDATED, self.on_ROI_update)
 
-    def process(self):
-        # denoise: cv2.fastNlMeansDenoisingColored()
-        img = self.roi_ctrl_view.img
-        # cv2.imshow('denoised', img)
-        gray_mat = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        edges_mat = gray_mat.copy()
-        edges_mat = cv2.Canny(edges_mat, 100, 200)
+    def on_ROI_update(self, **kwargs):
+        self.train()
 
-        roi_images = []
+    def init_classificator(self, data=None):
+        logging.info('creating classificator')
+        self.classificator = algoritms.SVM()
+
+        if data is not None:
+            logging.debug("initializing classificator from provided data: %s" % data.decode('utf-8'))
+            self.classificator.deserialize(data)
+
+    def build_hog_descriptors(self, img):
+        images = []
+        descriptors = []
+        responses = []
+
         for roi in self.roi_ctrl_view.ROIs:
-            sample = algoritms.crop_sample_image(edges_mat, roi.points)
-            roi_images.append(sample)
+            sample = algoritms.crop_sample_image(img, roi.points)
+            hog = algoritms.hog(sample)
+            descriptors.append(np.float32(hog))
+            responses.append(0 if roi.is_free() else 1)
+            images.append(sample)
 
-        if len(roi_images) > 0:
-            logging.debug("training image shape: %s", algoritms.compute_training_sample_shape(roi_images))
-            miv = MultipleImagesView("ROI", roi_images)
+        return descriptors, responses, images, self.roi_ctrl_view.ROIs
+
+    def is_trained(self):
+        return self.classificator is not None
+
+    def process(self, img):
+        assert self.is_trained()
+
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        descriptors, responses, images, ROIs = self.build_hog_descriptors(gray_img)
+
+        for descriptor in descriptors:
+            logging.debug("process(): %d" % (self.classificator.predict(descriptor)))
+
+    def train(self):
+        img = self.roi_ctrl_view.img
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        train_data, responses, images, ROIs = self.build_hog_descriptors(gray_img)
+
+        if len(train_data) > 0:
+            miv = MultipleImagesView("Regions of interests", images)
             miv.show()
 
+            self.init_classificator()
+            self.classificator.train(np.float32(train_data), np.array(responses, np.int))
+
     def save(self):
+        logging.info('saving training data to file \"%s\"' % self.project_path)
+
         assert self.project_path is not None
-        cached_data = {'ROI': self.roi_ctrl_view.ROIs}
+        classificator_data = self.classificator.serialize() if self.classificator is not None else None
+        assert classificator_data is not None
+        cached_data = {'ROI': self.roi_ctrl_view.ROIs,
+                       'classificator_data': classificator_data
+                       }
+
         pickle.dump(cached_data, open(self.project_path, "wb"))
 
     def event_loop(self):
@@ -163,10 +239,17 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--project', help='project file path')
-    parser.add_argument('--src-image', help='source image file')
+    parser.add_argument('--image', help='source image file')
     args = parser.parse_args()
 
     app = Application()
-    app.init(args.src_image, args.project)
-    app.process()
+    app.init(args.image, args.project)
+
+    if not app.is_trained():
+        app.train()
+
+    if app.is_trained() and args.image is not None:
+        img = cv2.imread(args.image)
+        app.process(img)
+
     app.event_loop()
