@@ -6,6 +6,7 @@ import logging
 
 logger = logging.getLogger(__file__)
 
+
 class ImageFeed(object):
     def __init__():
         pass

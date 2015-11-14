@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python2
 
 import logging
 import cv2
@@ -6,6 +6,7 @@ import numpy as np
 import argparse
 import pickle
 import algoritms
+import copy
 
 
 class EventEmiter(object):
@@ -47,7 +48,7 @@ class MultipleImagesView(object):
         current_y = 0
 
         for image in self.images:
-            logging.debug("%s - %s" % (self.image.shape, image.shape))
+            logging.debug("MultipleImagesView initialization: %s - %s" % (self.image.shape, image.shape))
             self.image[current_y:current_y + image.shape[0], current_x:current_x + image.shape[1]] = image
             current_x += image.shape[1] + 2
 
@@ -85,6 +86,9 @@ class ROICtrl(EventEmiter):
     COLOR_BUSY_ROI_MARGIN = (0, 0, 255)
     COLOR_ROI_POINT = (255, 0, 0)
 
+    MODE_TRAINING = 0
+    MODE_PREDICTION = 1
+
     class Events:
         ROI_UPDATED = 'roi_updated'
 
@@ -96,7 +100,10 @@ class ROICtrl(EventEmiter):
         self.name = window_name
         self.selected_region = None
         self.ROIs = ROIs if ROIs is not None else []
+        self.predicted_ROIs = []
+
         self.roi_type = ROI.Type.FREE
+        self.mode = self.MODE_TRAINING
 
         cv2.imshow(self.name, self.img)
         cv2.setMouseCallback(window_name, self.__mouse_event_callback)
@@ -112,39 +119,49 @@ class ROICtrl(EventEmiter):
             for i in range(1, len(points)):
                 cv2.line(img, points[i - 1], points[i], color, 2)
 
-    def __update_points(self):
-        if len(self._points) > 0 or len(self.ROIs) > 0:
-            img = self.img.copy()
-            self.__hightlight_region(img, self._points, self.COLOR_FREE_ROI_MARGIN)
+    def redraw(self):
+        self.__update_points()
 
-            for roi in self.ROIs:
+    def __update_points(self):
+        img = self.img.copy()
+
+        if self.mode == self.MODE_TRAINING:
+            if len(self._points) > 0 or len(self.ROIs) > 0:
+                self.__hightlight_region(img, self._points, self.COLOR_FREE_ROI_MARGIN)
+
+                for roi in self.ROIs:
+                    self.__hightlight_region(img, roi.points, self.COLOR_FREE_ROI_MARGIN if roi.is_free() else self.COLOR_BUSY_ROI_MARGIN)
+
+        elif self.mode == self.MODE_PREDICTION:
+            for roi in self.predicted_ROIs:
                 self.__hightlight_region(img, roi.points, self.COLOR_FREE_ROI_MARGIN if roi.is_free() else self.COLOR_BUSY_ROI_MARGIN)
 
-            cv2.imshow(self.name, img)
+        cv2.imshow(self.name, img)
 
     def __mouse_event_callback(self, event, x, y, flags, params):
-        if event == cv2.EVENT_LBUTTONDOWN or event == cv2.EVENT_RBUTTONDOWN:
-            if event == cv2.EVENT_RBUTTONDOWN:
-                self.roi_type = ROI.Type.FREE
-            else:
-                self.roi_type = ROI.Type.BUSY
+        if self.mode == self.MODE_TRAINING:
+            if event == cv2.EVENT_LBUTTONDOWN or event == cv2.EVENT_RBUTTONDOWN:
+                if event == cv2.EVENT_RBUTTONDOWN:
+                    self.roi_type = ROI.Type.FREE
+                else:
+                    self.roi_type = ROI.Type.BUSY
 
-            if len(self._points) < 4:
-                self._points.append((x, y))
+                if len(self._points) < 4:
+                    self._points.append((x, y))
 
-            if len(self._points) == 4:
-                self.ROIs.append(ROI(self._points, self.roi_type))
-                self.emit(ROICtrl.Events.ROI_UPDATED, data=self.ROIs)
-                self._points = []
+                if len(self._points) == 4:
+                    self.ROIs.append(ROI(self._points, self.roi_type))
+                    self._points = []
+                    self.emit(ROICtrl.Events.ROI_UPDATED, data=self.ROIs)
 
-            self.__update_points()
-
-        elif event == cv2.EVENT_MOUSEMOVE:
-            pass
+        self.__update_points()
 
 
 class Application(object):
     IMAGE_VIEW_WINDOWS_NAME = "Image view"
+
+    STATUS_BUSY = 1
+    STATUS_FREE = 0
 
     def __init__(self):
         self.roi_ctrl_view = None
@@ -159,7 +176,7 @@ class Application(object):
         try:
             cached_data = pickle.load(open(project_path, "rb"))
             ROI = cached_data['ROI']
-            self.init_classificator(cached_data['classificator_data'])
+            self._init_classificator(cached_data['classificator_data'])
         except (ValueError, OSError, IOError, pickle.UnpicklingError) as e:
             logging.error('settings was not loaded: %s' % e)
 
@@ -167,14 +184,23 @@ class Application(object):
         self.roi_ctrl_view.on(ROICtrl.Events.ROI_UPDATED, self.on_ROI_update)
 
     def on_ROI_update(self, **kwargs):
-        self.train()
+        busy = False
+        free = False
+        for roi in kwargs['data']:
+            if roi.is_busy():
+                busy = True
+            else:
+                free = True
 
-    def init_classificator(self, data=None):
+        if free and busy:
+            self.train()
+
+    def _init_classificator(self, data=None):
         logging.info('creating classificator')
         self.classificator = algoritms.SVM()
 
         if data is not None:
-            logging.debug("initializing classificator from provided data: %s" % data.decode('utf-8'))
+            logging.debug("initializing classificator from provided data")
             self.classificator.deserialize(data)
 
     def build_hog_descriptors(self, img):
@@ -186,10 +212,11 @@ class Application(object):
             sample = algoritms.crop_sample_image(img, roi.points)
             hog = algoritms.hog(sample)
             descriptors.append(np.float32(hog))
-            responses.append(0 if roi.is_free() else 1)
+            responses.append(self.STATUS_FREE if roi.is_free() else self.STATUS_BUSY)
             images.append(sample)
 
-        return descriptors, responses, images, self.roi_ctrl_view.ROIs
+        logging.debug('hog responses: %s' % responses)
+        return np.float32(descriptors), np.int32(responses), images, self.roi_ctrl_view.ROIs
 
     def is_trained(self):
         return self.classificator is not None
@@ -200,21 +227,34 @@ class Application(object):
         gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         descriptors, responses, images, ROIs = self.build_hog_descriptors(gray_img)
 
-        for descriptor in descriptors:
-            logging.debug("process(): %d" % (self.classificator.predict(descriptor)))
+        logging.debug('processing %d descriptors' % len(descriptors))
+        predictions = self.classificator.predict(descriptors)
+        logging.debug('predictions - %s' % predictions)
+
+        predicted_ROIs = []
+        assert len(predictions) == len(ROIs)
+
+        for i in range(len(predictions)):
+            logging.debug('hog - %s, prediction - %d' % (descriptors[i], predictions[i]))
+            roi = copy.copy(ROIs[i])
+            prediction = predictions[i]
+            roi.type = ROI.Type.FREE if prediction == self.STATUS_FREE else ROI.Type.BUSY
+            predicted_ROIs.append(roi)
+
+        self.roi_ctrl_view.mode = ROICtrl.MODE_PREDICTION
+        self.roi_ctrl_view.predicted_ROIs = predicted_ROIs
+        self.roi_ctrl_view.redraw()
 
     def train(self):
-        img = self.roi_ctrl_view.img
-        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray_img = cv2.cvtColor(self.roi_ctrl_view.img, cv2.COLOR_BGR2GRAY)
 
-        train_data, responses, images, ROIs = self.build_hog_descriptors(gray_img)
+        training_data, responses, images, ROIs = self.build_hog_descriptors(gray_img)
 
-        if len(train_data) > 0:
+        if len(training_data) > 0:
             miv = MultipleImagesView("Regions of interests", images)
             miv.show()
-
-            self.init_classificator()
-            self.classificator.train(np.float32(train_data), np.array(responses, np.int))
+            self._init_classificator()
+            self.classificator.train(training_data, responses)
 
     def save(self):
         logging.info('saving training data to file \"%s\"' % self.project_path)
@@ -238,15 +278,12 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--project', help='project file path')
+    parser.add_argument('--project', required=True, help='project file path')
     parser.add_argument('--image', help='source image file')
     args = parser.parse_args()
 
     app = Application()
     app.init(args.image, args.project)
-
-    if not app.is_trained():
-        app.train()
 
     if app.is_trained() and args.image is not None:
         img = cv2.imread(args.image)
