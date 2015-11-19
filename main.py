@@ -47,13 +47,49 @@ class MultipleImagesView(object):
         current_x = 0
         current_y = 0
 
+        max_x = 0
+        max_y = 0
+
         for image in self.images:
-            logging.debug("MultipleImagesView initialization: %s - %s" % (self.image.shape, image.shape))
+            max_y = max(max_y, image.shape[0])
+            max_x = max(max_x, image.shape[1])
+
+        images = []
+        for image in self.images:
+            images.append(cv2.resize(image, (max_x, max_y), interpolation=cv2.INTER_CUBIC))
+
+        for image in images:
             self.image[current_y:current_y + image.shape[0], current_x:current_x + image.shape[1]] = image
             current_x += image.shape[1] + 2
 
     def show(self):
         cv2.imshow(self.title, self.image)
+
+
+class HOGDEscriptorsView(MultipleImagesView):
+    def __init__(self, descriptors):
+        assert len(descriptors) > 0
+        visualised_descriptors = []
+
+        import math
+        normalizer = 0
+        for descriptor in descriptors:
+            normalizer = max(normalizer, descriptor.max())
+
+        for descriptor in descriptors:
+            d = descriptor.reshape(-1, math.sqrt(descriptor.shape[0])) / normalizer
+
+            height = d.shape[0]
+            width = d.shape[1]
+
+            d = cv2.resize(d, (10 * width, 10 * height), interpolation=cv2.INTER_CUBIC)
+            visualised_descriptors.append(d)
+
+            logging.debug('descriptor shape: %s' % str(d.shape))
+
+        logging.debug('descriptors view: %s' % visualised_descriptors)
+
+        MultipleImagesView.__init__(self, 'descriptors visualization', visualised_descriptors)
 
 
 class ROI(object):
@@ -204,18 +240,31 @@ class Application(object):
             self.classificator.deserialize(data)
 
     def build_hog_descriptors(self, img):
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # edges = cv2.Canny(gray_img, 100, 200)
+        preprocessed_image = gray_img
+
         images = []
         descriptors = []
         responses = []
+        patterns = []
 
         for roi in self.roi_ctrl_view.ROIs:
-            sample = algoritms.crop_sample_image(img, roi.points)
+            sample, pattern, bg = algoritms.crop_sample_image(preprocessed_image, roi.points, background_color=None)
+            patterns.append(pattern)
+
             hog = algoritms.hog(sample)
             descriptors.append(np.float32(hog))
             responses.append(self.STATUS_FREE if roi.is_free() else self.STATUS_BUSY)
             images.append(sample)
 
-        logging.debug('hog responses: %s' % responses)
+        desc_view = HOGDEscriptorsView(descriptors)
+        desc_view.show()
+
+        patterns_view = MultipleImagesView('patterns visualization', patterns)
+        patterns_view.show()
+        # logging.debug('hog responses: %s' % responses)
+
         return np.float32(descriptors), np.int32(responses), images, self.roi_ctrl_view.ROIs
 
     def is_trained(self):
@@ -223,9 +272,7 @@ class Application(object):
 
     def process(self, img):
         assert self.is_trained()
-
-        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        descriptors, responses, images, ROIs = self.build_hog_descriptors(gray_img)
+        descriptors, responses, images, ROIs = self.build_hog_descriptors(img)
 
         logging.debug('processing %d descriptors' % len(descriptors))
         predictions = self.classificator.predict(descriptors)
@@ -245,10 +292,10 @@ class Application(object):
         self.roi_ctrl_view.predicted_ROIs = predicted_ROIs
         self.roi_ctrl_view.redraw()
 
-    def train(self):
-        gray_img = cv2.cvtColor(self.roi_ctrl_view.img, cv2.COLOR_BGR2GRAY)
+        return images, predicted_ROIs
 
-        training_data, responses, images, ROIs = self.build_hog_descriptors(gray_img)
+    def train(self):
+        training_data, responses, images, ROIs = self.build_hog_descriptors(self.roi_ctrl_view.img)
 
         if len(training_data) > 0:
             miv = MultipleImagesView("Regions of interests", images)
@@ -287,6 +334,8 @@ if __name__ == "__main__":
 
     if app.is_trained() and args.image is not None:
         img = cv2.imread(args.image)
-        app.process(img)
+        images, rois = app.process(img)
+        cutted = MultipleImagesView('Regions of interest visualization', images)
+        cutted.show()
 
     app.event_loop()
